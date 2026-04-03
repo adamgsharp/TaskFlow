@@ -297,7 +297,7 @@
 
     /* ── Node pencil rename button ── */
     .node-edit-btn {
-      position: absolute; bottom: 4px; right: 10px;
+      position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
       width: 16px; height: 16px;
       display: none; align-items: center; justify-content: center;
       border: none; background: transparent; padding: 0;
@@ -907,22 +907,29 @@ function deleteSelectedTasks() {
   persist(); render();
 }
 
-function startInlineEdit(taskId) {
+// isNew=true means the task was just created; cancel or empty title removes it entirely
+function startInlineEdit(taskId, isNew) {
   const task=S.tasks[taskId];
   if(!task) return;
   const titleEl=document.querySelector(`.flow-node[data-id="${taskId}"] .node-title`);
   if(!titleEl) return;
   const input=document.createElement('input');
   input.className='node-title-input';
-  input.value=task.title;
+  input.value=isNew?'':task.title;
+  input.placeholder='Task name…';
   titleEl.replaceWith(input);
-  input.focus(); input.select();
+  input.focus(); if(!isNew) input.select();
   let done=false;
   function finish(cancel) {
     if(done) return; done=true;
     const val=input.value.trim();
-    if(!cancel&&val&&val!==task.title){ S.tasks[taskId].title=val; persist(); }
-    renderFlow();
+    if(cancel||!val) {
+      if(isNew){ delete S.tasks[taskId]; renderFlow(); }
+      else { renderFlow(); }
+    } else {
+      if(val!==task.title){ S.tasks[taskId].title=val; persist(); }
+      renderFlow();
+    }
   }
   input.addEventListener('blur', ()=>finish(false));
   input.addEventListener('keydown', e=>{
@@ -944,9 +951,14 @@ function setupFlowEvents() {
   outer.addEventListener('dblclick', e=>{
     if(e.target.closest('.node-port')||e.target.closest('[data-editname]')) return;
     const nd=e.target.closest('.flow-node');
-    if(nd){ openTaskModal(nd.dataset.id); return; }
-    pendingAddPos=toCanvas(e.clientX,e.clientY);
-    openTaskModal(null);
+    if(nd){ startInlineEdit(nd.dataset.id, false); return; }
+    // Empty canvas: create a new node at the click position and go straight to inline edit
+    const pos=toCanvas(e.clientX,e.clientY);
+    const id='tk'+Date.now();
+    S.tasks[id]={ id, title:'', completed:false, prereqs:[], dependents:[],
+      x:pos.x-NW/2, y:pos.y-NH/2 };
+    renderFlow();
+    requestAnimationFrame(()=>startInlineEdit(id, true));
   });
 }
 
@@ -1148,7 +1160,7 @@ function onTE() {
 function onCC(e) {
   if(e.target.closest('.node-port')) return;
   const editBtn=e.target.closest('[data-editname]');
-  if(editBtn){ e.stopPropagation(); startInlineEdit(editBtn.dataset.editname); return; }
+  if(editBtn){ e.stopPropagation(); openTaskModal(editBtn.dataset.editname); return; }
   if(lastDrag){ lastDrag=false; return; }
   const cb=e.target.closest('[data-cb]');
   if(cb){ e.stopPropagation(); toggleTask(cb.dataset.cb); return; }
@@ -1290,7 +1302,7 @@ document.addEventListener('keydown', e=>{
     e.preventDefault();
     if(!spaceDown){ spaceDown=true; document.body.classList.add('pan-mode'); }
   }
-  if((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.target.matches('input,textarea')){
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!e.target.matches('input,textarea')){
     e.preventDefault();
     if(e.shiftKey) redo(); else undo();
   }
