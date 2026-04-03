@@ -78,8 +78,11 @@
 
     /* ── Flow view ── */
     #flow-view { width: 100%; height: 100%; position: relative; }
-    #flow-outer { width: 100%; height: 100%; overflow: hidden; position: relative; cursor: grab; }
+    #flow-outer { width: 100%; height: 100%; overflow: hidden; position: relative; cursor: default; }
     #flow-outer.panning { cursor: grabbing; }
+    #flow-outer.marqueeing { cursor: crosshair; }
+    body.pan-mode #flow-outer { cursor: grab; }
+    body.pan-mode #flow-outer.panning { cursor: grabbing; }
     #flow-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
     #edges-svg { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 
@@ -273,6 +276,35 @@
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
 
+    /* ── Selection ── */
+    .flow-node.selected { box-shadow: 0 0 0 2.5px var(--primary), 0 2px 10px rgba(0,0,0,.1) !important; }
+
+    /* ── Marquee ── */
+    #marquee-rect {
+      position: absolute; pointer-events: none; z-index: 20;
+      border: 1.5px dashed var(--primary); background: rgba(99,102,241,.07);
+      border-radius: 3px; display: none;
+    }
+
+    /* ── Inline rename ── */
+    .node-title-input {
+      flex: 1; font-size: 13px; font-weight: 500; color: var(--text);
+      border: none; outline: none; background: transparent;
+      line-height: 1.35; padding: 0; min-width: 0;
+    }
+
+    /* ── Node pencil rename button ── */
+    .node-edit-btn {
+      position: absolute; bottom: 4px; right: 10px;
+      width: 16px; height: 16px;
+      display: none; align-items: center; justify-content: center;
+      border: none; background: transparent; padding: 0;
+      cursor: pointer; color: var(--text3); border-radius: 3px;
+      transition: color .15s, background .15s;
+    }
+    .flow-node:hover .node-edit-btn { display: flex; }
+    .node-edit-btn:hover { color: var(--primary); background: var(--primary-light); }
+
     /* ── Connection ports ── */
     .node-port {
       position: absolute; width: 13px; height: 13px; border-radius: 50%;
@@ -360,6 +392,7 @@
         <div id="flow-canvas">
           <svg id="edges-svg"></svg>
         </div>
+        <div id="marquee-rect"></div>
       </div>
       <div id="flow-toolbar">
         <button class="tb-btn" onclick="autoArrange()">
@@ -575,6 +608,7 @@ function deleteTask(id) {
   t.prereqs.forEach(pid => { if(S.tasks[pid]) S.tasks[pid].dependents = S.tasks[pid].dependents.filter(d=>d!==id); });
   t.dependents.forEach(did => { if(S.tasks[did]) S.tasks[did].prereqs = S.tasks[did].prereqs.filter(p=>p!==id); });
   delete S.tasks[id];
+  selectedIds.delete(id);
   persist(); render();
 }
 
@@ -640,7 +674,7 @@ function renderFlow() {
 function makeNodeEl(task) {
   const s = status(task), c = SC[s];
   const div = document.createElement('div');
-  div.className = 'flow-node';
+  div.className = 'flow-node' + (selectedIds.has(task.id) ? ' selected' : '');
   div.dataset.id = task.id;
   div.style.cssText = `left:${task.x||0}px;top:${task.y||0}px;background:${c.bg};border-color:${c.bd}`;
 
@@ -654,6 +688,9 @@ function makeNodeEl(task) {
     <div class="node-cb" data-cb="${task.id}" style="${cbStyle}">${check}</div>
     <span class="node-title${task.completed?' done':''}">${esc(task.title)}</span>
     <div class="node-dot" style="background:${c.dot}"></div>
+    <button class="node-edit-btn" data-editname="${task.id}" title="Rename">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M7 1L9 3L3.5 8.5H1.5V6.5L7 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/></svg>
+    </button>
     <div class="node-port port-right" data-port="post" data-node="${task.id}"></div>
   `;
   return div;
@@ -770,6 +807,9 @@ let panning=false, panSM={x:0,y:0}, panST={x:0,y:0};
 let dragging=false, dragId=null, dragSM={x:0,y:0}, dragSP={x:0,y:0}, didDrag=false, lastDrag=false;
 let connDragging=false, connFromId=null, connFromSide=null;
 let pendingAddPos=null;
+let selectedIds=new Set();
+let marquee=false, marqueeStart={x:0,y:0}, marqueeCur={x:0,y:0}, marqueeMoved=false;
+let spaceDown=false;
 let touches=[], pinchDist0=0, pinchScale0=1, pinchPan0={x:0,y:0};
 
 function applyVT() {
@@ -797,6 +837,48 @@ function fitView() {
   applyVT();
 }
 
+function updateSelectionClasses() {
+  document.querySelectorAll('.flow-node').forEach(el=>{
+    el.classList.toggle('selected', selectedIds.has(el.dataset.id));
+  });
+}
+
+function deleteSelectedTasks() {
+  selectedIds.forEach(id=>{
+    if(!S.tasks[id]) return;
+    const t=S.tasks[id];
+    t.prereqs.forEach(pid=>{ if(S.tasks[pid]) S.tasks[pid].dependents=S.tasks[pid].dependents.filter(d=>d!==id); });
+    t.dependents.forEach(did=>{ if(S.tasks[did]) S.tasks[did].prereqs=S.tasks[did].prereqs.filter(p=>p!==id); });
+    delete S.tasks[id];
+  });
+  selectedIds.clear();
+  persist(); render();
+}
+
+function startInlineEdit(taskId) {
+  const task=S.tasks[taskId];
+  if(!task) return;
+  const titleEl=document.querySelector(`.flow-node[data-id="${taskId}"] .node-title`);
+  if(!titleEl) return;
+  const input=document.createElement('input');
+  input.className='node-title-input';
+  input.value=task.title;
+  titleEl.replaceWith(input);
+  input.focus(); input.select();
+  let done=false;
+  function finish(cancel) {
+    if(done) return; done=true;
+    const val=input.value.trim();
+    if(!cancel&&val&&val!==task.title){ S.tasks[taskId].title=val; persist(); }
+    renderFlow();
+  }
+  input.addEventListener('blur', ()=>finish(false));
+  input.addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ e.preventDefault(); finish(false); }
+    if(e.key==='Escape'){ e.stopPropagation(); finish(true); }
+  });
+}
+
 function setupFlowEvents() {
   const outer=document.getElementById('flow-outer');
   outer.addEventListener('mousedown', onMD);
@@ -808,7 +890,9 @@ function setupFlowEvents() {
   outer.addEventListener('touchend', onTE, {passive:false});
   document.getElementById('flow-canvas').addEventListener('click', onCC);
   outer.addEventListener('dblclick', e=>{
-    if(e.target.closest('.flow-node')||e.target.closest('.node-port')) return;
+    if(e.target.closest('.node-port')||e.target.closest('[data-editname]')) return;
+    const nd=e.target.closest('.flow-node');
+    if(nd){ openTaskModal(nd.dataset.id); return; }
     pendingAddPos=toCanvas(e.clientX,e.clientY);
     openTaskModal(null);
   });
@@ -821,16 +905,26 @@ function onMD(e) {
     document.getElementById('ghost-svg').style.display='block';
     e.preventDefault(); e.stopPropagation(); return;
   }
+  if(e.target.closest('[data-editname]')) return; // pencil handled on click
+  if(e.target.dataset.cb) return;                 // checkbox handled on click
   const nd=e.target.closest('.flow-node');
-  if (nd && !e.target.dataset.cb) {
+  if(nd) {
     dragging=true; didDrag=false; dragId=nd.dataset.id;
     dragSM=toCanvas(e.clientX,e.clientY);
     const t=S.tasks[dragId]; dragSP={x:t.x||0,y:t.y||0};
     nd.classList.add('dragging'); e.preventDefault(); return;
   }
-  if (e.target.dataset.cb) return;
-  panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
-  document.getElementById('flow-outer').classList.add('panning'); e.preventDefault();
+  // Empty canvas: space = pan, otherwise = marquee select
+  e.preventDefault();
+  if(spaceDown) {
+    panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
+    document.getElementById('flow-outer').classList.add('panning');
+  } else {
+    const r=document.getElementById('flow-outer').getBoundingClientRect();
+    marqueeStart={x:e.clientX-r.left, y:e.clientY-r.top};
+    marqueeCur={...marqueeStart}; marqueeMoved=false; marquee=true;
+    document.getElementById('flow-outer').classList.add('marqueeing');
+  }
 }
 
 function onMM(e) {
@@ -865,10 +959,44 @@ function onMM(e) {
   }
   if(panning){
     VT.x=panST.x+(e.clientX-panSM.x); VT.y=panST.y+(e.clientY-panSM.y); applyVT();
+    return;
+  }
+  if(marquee) {
+    const r=document.getElementById('flow-outer').getBoundingClientRect();
+    marqueeCur={x:e.clientX-r.left, y:e.clientY-r.top};
+    const dx=marqueeCur.x-marqueeStart.x, dy=marqueeCur.y-marqueeStart.y;
+    if(Math.abs(dx)>4||Math.abs(dy)>4) marqueeMoved=true;
+    if(marqueeMoved) {
+      const x=Math.min(marqueeStart.x,marqueeCur.x), y=Math.min(marqueeStart.y,marqueeCur.y);
+      const mq=document.getElementById('marquee-rect');
+      mq.style.cssText=`display:block;left:${x}px;top:${y}px;width:${Math.abs(dx)}px;height:${Math.abs(dy)}px`;
+    }
   }
 }
 
 function onMU(e) {
+  if(marquee) {
+    const outer=document.getElementById('flow-outer');
+    outer.classList.remove('marqueeing');
+    document.getElementById('marquee-rect').style.display='none';
+    if(marqueeMoved) {
+      const r=outer.getBoundingClientRect();
+      const c1=toCanvas(marqueeStart.x+r.left, marqueeStart.y+r.top);
+      const c2=toCanvas(marqueeCur.x+r.left, marqueeCur.y+r.top);
+      const mx1=Math.min(c1.x,c2.x), my1=Math.min(c1.y,c2.y);
+      const mx2=Math.max(c1.x,c2.x), my2=Math.max(c1.y,c2.y);
+      selectedIds.clear();
+      Object.values(S.tasks).forEach(t=>{
+        if(S.hideCompleted&&t.completed) return;
+        const tx=t.x||0, ty=t.y||0;
+        if(tx<mx2&&tx+NW>mx1&&ty<my2&&ty+NH>my1) selectedIds.add(t.id);
+      });
+      updateSelectionClasses();
+    } else {
+      selectedIds.clear(); updateSelectionClasses();
+    }
+    marquee=false; marqueeMoved=false; return;
+  }
   if(connDragging) {
     document.getElementById('ghost-svg').style.display='none';
     document.querySelectorAll('.flow-node.conn-target').forEach(n=>n.classList.remove('conn-target'));
@@ -967,11 +1095,20 @@ function onTE() {
 
 function onCC(e) {
   if(e.target.closest('.node-port')) return;
+  const editBtn=e.target.closest('[data-editname]');
+  if(editBtn){ e.stopPropagation(); startInlineEdit(editBtn.dataset.editname); return; }
+  if(lastDrag){ lastDrag=false; return; }
   const cb=e.target.closest('[data-cb]');
   if(cb){ e.stopPropagation(); toggleTask(cb.dataset.cb); return; }
-  if(!lastDrag){
-    const nd=e.target.closest('.flow-node');
-    if(nd) openTaskModal(nd.dataset.id);
+  const nd=e.target.closest('.flow-node');
+  if(nd) {
+    if(e.shiftKey) {
+      if(selectedIds.has(nd.dataset.id)) selectedIds.delete(nd.dataset.id);
+      else selectedIds.add(nd.dataset.id);
+    } else {
+      selectedIds.clear(); selectedIds.add(nd.dataset.id);
+    }
+    updateSelectionClasses();
   }
   lastDrag=false;
 }
@@ -1090,9 +1227,20 @@ document.addEventListener('mousedown', e=>{
   });
 });
 
-// Escape key closes modal
 document.addEventListener('keydown', e=>{
-  if(e.key==='Escape') closeModal();
+  if(e.key==='Escape'){ selectedIds.clear(); updateSelectionClasses(); closeModal(); }
+  if((e.key==='Delete'||e.key==='Backspace')&&!e.target.matches('input,textarea')){
+    if(!document.getElementById('modal-overlay').classList.contains('open')&&selectedIds.size>0){
+      deleteSelectedTasks();
+    }
+  }
+  if(e.key===' '&&!e.target.matches('input,textarea')){
+    e.preventDefault();
+    if(!spaceDown){ spaceDown=true; document.body.classList.add('pan-mode'); }
+  }
+});
+document.addEventListener('keyup', e=>{
+  if(e.key===' '){ spaceDown=false; document.body.classList.remove('pan-mode'); }
 });
 
 // Enter key on modal title
