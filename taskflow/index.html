@@ -273,6 +273,19 @@
     ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
 
+    /* ── Connection ports ── */
+    .node-port {
+      position: absolute; width: 13px; height: 13px; border-radius: 50%;
+      background: white; border: 2px solid #94a3b8;
+      top: 50%; transform: translateY(-50%);
+      cursor: crosshair; z-index: 5;
+      transition: border-color .15s, background .15s, box-shadow .15s, transform .15s;
+    }
+    .node-port:hover { border-color: var(--primary); background: var(--primary-light); box-shadow: 0 0 0 4px rgba(99,102,241,.2); transform: translateY(-50%) scale(1.25); }
+    .port-left { left: -7px; }
+    .port-right { right: -7px; }
+    .flow-node.conn-target { box-shadow: 0 0 0 3px rgba(99,102,241,.5) !important; border-color: var(--primary) !important; }
+
     /* ── Mobile ── */
     @media (max-width: 560px) {
       .logo-text { display: none; }
@@ -387,6 +400,10 @@
     </div>
   </div>
 </div>
+
+<svg id="ghost-svg" style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:500;display:none" xmlns="http://www.w3.org/2000/svg">
+  <path id="ghost-path" stroke="#6366f1" stroke-width="2.5" fill="none" stroke-dasharray="7 4" opacity="0.85"/>
+</svg>
 
 <script>
 'use strict';
@@ -515,7 +532,13 @@ function addTask(title, pre, post) {
   syncRel(id, pre, post);
   S.tasks[id].prereqs = pre;
   S.tasks[id].dependents = post;
-  doLayout();
+  if(pendingAddPos) {
+    S.tasks[id].x = pendingAddPos.x - NW/2;
+    S.tasks[id].y = pendingAddPos.y - NH/2;
+    pendingAddPos = null;
+  } else {
+    doLayout();
+  }
   persist(); render();
 }
 
@@ -602,9 +625,11 @@ function makeNodeEl(task) {
     : '';
 
   div.innerHTML = `
+    <div class="node-port port-left" data-port="pre" data-node="${task.id}"></div>
     <div class="node-cb" data-cb="${task.id}" style="${cbStyle}">${check}</div>
     <span class="node-title${task.completed?' done':''}">${esc(task.title)}</span>
     <div class="node-dot" style="background:${c.dot}"></div>
+    <div class="node-port port-right" data-port="post" data-node="${task.id}"></div>
   `;
   return div;
 }
@@ -714,7 +739,9 @@ function renderList() {
 // ════════════════════════════════════════════════════════════
 let VT = { x:40, y:40, scale:1 };
 let panning=false, panSM={x:0,y:0}, panST={x:0,y:0};
-let dragging=false, dragId=null, dragSM={x:0,y:0}, dragSP={x:0,y:0}, didDrag=false;
+let dragging=false, dragId=null, dragSM={x:0,y:0}, dragSP={x:0,y:0}, didDrag=false, lastDrag=false;
+let connDragging=false, connFromId=null, connFromSide=null;
+let pendingAddPos=null;
 let touches=[], pinchDist0=0, pinchScale0=1, pinchPan0={x:0,y:0};
 
 function applyVT() {
@@ -752,9 +779,20 @@ function setupFlowEvents() {
   outer.addEventListener('touchmove', onTM, {passive:false});
   outer.addEventListener('touchend', onTE, {passive:false});
   document.getElementById('flow-canvas').addEventListener('click', onCC);
+  outer.addEventListener('dblclick', e=>{
+    if(e.target.closest('.flow-node')||e.target.closest('.node-port')) return;
+    pendingAddPos=toCanvas(e.clientX,e.clientY);
+    openTaskModal(null);
+  });
 }
 
 function onMD(e) {
+  const port=e.target.closest('.node-port');
+  if(port) {
+    connDragging=true; connFromId=port.dataset.node; connFromSide=port.dataset.port;
+    document.getElementById('ghost-svg').style.display='block';
+    e.preventDefault(); e.stopPropagation(); return;
+  }
   const nd=e.target.closest('.flow-node');
   if (nd && !e.target.dataset.cb) {
     dragging=true; didDrag=false; dragId=nd.dataset.id;
@@ -768,6 +806,23 @@ function onMD(e) {
 }
 
 function onMM(e) {
+  if(connDragging&&connFromId) {
+    const portEl=document.querySelector(`.node-port[data-node="${connFromId}"][data-port="${connFromSide}"]`);
+    if(portEl) {
+      const pr=portEl.getBoundingClientRect();
+      const sx=pr.left+pr.width/2, sy=pr.top+pr.height/2;
+      const ex=e.clientX, ey=e.clientY;
+      const cv=Math.max(50,Math.abs(ex-sx)*0.45);
+      const d=connFromSide==='post'
+        ? `M${sx} ${sy} C${sx+cv} ${sy},${ex-cv} ${ey},${ex} ${ey}`
+        : `M${sx} ${sy} C${sx-cv} ${sy},${ex+cv} ${ey},${ex} ${ey}`;
+      document.getElementById('ghost-path').setAttribute('d',d);
+      document.querySelectorAll('.flow-node.conn-target').forEach(n=>n.classList.remove('conn-target'));
+      const over=document.elementFromPoint(ex,ey)?.closest('.flow-node');
+      if(over&&over.dataset.id!==connFromId) over.classList.add('conn-target');
+    }
+    return;
+  }
   if (dragging&&dragId) {
     const cp=toCanvas(e.clientX,e.clientY);
     const dx=cp.x-dragSM.x, dy=cp.y-dragSM.y;
@@ -785,12 +840,36 @@ function onMM(e) {
   }
 }
 
-function onMU() {
+function onMU(e) {
+  if(connDragging) {
+    document.getElementById('ghost-svg').style.display='none';
+    document.querySelectorAll('.flow-node.conn-target').forEach(n=>n.classList.remove('conn-target'));
+    const el=document.elementFromPoint(e.clientX,e.clientY);
+    const targetNd=el?.closest('.flow-node');
+    if(targetNd&&targetNd.dataset.id!==connFromId) {
+      const targetId=targetNd.dataset.id;
+      let preId, depId;
+      if(connFromSide==='post'){ preId=connFromId; depId=targetId; }
+      else { preId=targetId; depId=connFromId; }
+      if(!wouldCycle(preId,depId)) {
+        const pre=S.tasks[preId], dep=S.tasks[depId];
+        if(pre&&dep&&!pre.dependents.includes(depId)) {
+          pre.dependents.push(depId); dep.prereqs.push(preId);
+          persist(); render();
+        }
+      }
+    }
+    connDragging=false; connFromId=null; connFromSide=null;
+    return;
+  }
   if(dragging){
+    lastDrag=didDrag;
     if(didDrag) persist();
     const nd=dragId&&document.querySelector(`.flow-node[data-id="${dragId}"]`);
     if(nd) nd.classList.remove('dragging');
     dragging=false; didDrag=false; dragId=null;
+  } else {
+    lastDrag=false;
   }
   if(panning){ panning=false; document.getElementById('flow-outer').classList.remove('panning'); }
 }
@@ -859,12 +938,14 @@ function onTE() {
 }
 
 function onCC(e) {
+  if(e.target.closest('.node-port')) return;
   const cb=e.target.closest('[data-cb]');
   if(cb){ e.stopPropagation(); toggleTask(cb.dataset.cb); return; }
-  if(!didDrag){
+  if(!lastDrag){
     const nd=e.target.closest('.flow-node');
     if(nd) openTaskModal(nd.dataset.id);
   }
+  lastDrag=false;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -914,7 +995,7 @@ function showDd(ddId, inputEl, selected, onPick, cycleCheck) {
   const dd=document.getElementById(ddId);
   const q=inputEl.value.toLowerCase();
   const excluded=new Set([mId, ...mPre, ...mPost].filter(Boolean));
-  const opts=Object.values(S.tasks).filter(t=>!excluded.has(t.id)&&t.title.toLowerCase().includes(q)).slice(0,8);
+  const opts=Object.values(S.tasks).filter(t=>!excluded.has(t.id)&&t.title.toLowerCase().includes(q)).slice(0,50);
   if(!opts.length){dd.style.display='none'; return;}
 
   const r=inputEl.getBoundingClientRect();
@@ -1007,6 +1088,9 @@ document.getElementById('list-view').addEventListener('click', e=>{
 function init() {
   initState();
   if(Object.values(S.tasks).some(t=>t.x===undefined)) doLayout();
+  document.getElementById('modal-overlay').addEventListener('mousedown', e=>{
+    if(e.target===document.getElementById('modal-overlay')) closeModal();
+  });
   setupFlowEvents();
   setupSearchInput('pre-search','pre-dd',()=>mPre, id=>{
     if(!wouldCycle(id, mId||'_')){ mPre.push(id); refreshChips(); }
