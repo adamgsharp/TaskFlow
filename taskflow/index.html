@@ -883,7 +883,7 @@ function cleanUp() {
   tasks.forEach(t => {
     const cx = t.x || 0, cy = t.y || 0;
     t.x = colXs.reduce((best, x) => Math.abs(x - cx) < Math.abs(best - cx) ? x : best);
-    t.y = Math.max(PAD, Math.round((cy - PAD) / halfStep) * halfStep + PAD);
+    t.y = Math.round((cy - PAD) / halfStep) * halfStep + PAD;
   });
 
   persist();
