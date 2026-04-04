@@ -862,12 +862,15 @@ function autoArrange() {
 // y — half-step grid (every (NH+V_GAP)/2) so nodes can sit between rows too.
 function cleanUp() {
   const allTasks = Object.values(S.tasks);
-  const tasks = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
+  const visible = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
+  // If nodes are selected, clean up only those; otherwise clean up all visible.
+  const tasks = selectedIds.size > 0 ? visible.filter(t => selectedIds.has(t.id)) : visible;
   if (!tasks.length) return;
 
-  // 1. Derive column x-values by clustering current task x positions.
+  // Columns are derived from ALL visible nodes so selected nodes snap to the same grid.
+  const colSource = visible;
   //    Any two x values within NW*0.6 of each other belong to the same column.
-  const sortedXs = tasks.map(t => t.x || 0).sort((a, b) => a - b);
+  const sortedXs = colSource.map(t => t.x || 0).sort((a, b) => a - b);
   const clusters = [];
   sortedXs.forEach(x => {
     const last = clusters[clusters.length - 1];
