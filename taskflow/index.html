@@ -851,7 +851,7 @@ function computeEdgePath(pre, task) {
     const cx = nx + NW/2;
     const frac = (cx - sx) / (tx - sx);
     const lineY = sy + frac * (ty - sy);
-    if (lineY >= ny - V_GAP/2 && lineY <= ny + NH + V_GAP/2) {
+    if (lineY >= ny - V_GAP*1.5 && lineY <= ny + NH + V_GAP*1.5) {
       blockers.push({cx, ny, lineY});
     }
   });
@@ -866,8 +866,8 @@ function computeEdgePath(pre, task) {
   const pts = [{x:sx, y:sy}];
   for (const {cx, ny, lineY} of blockers) {
     const wy = lineY < ny + NH/2
-      ? ny - V_GAP/2      // route above node
-      : ny + NH + V_GAP/2; // route below node
+      ? ny - V_GAP*1.5      // route above node
+      : ny + NH + V_GAP*1.5; // route below node
     pts.push({x:cx, y:wy});
   }
   pts.push({x:tx, y:ty});
@@ -982,7 +982,7 @@ function renderList() {
 // INTERACTIONS (pan / zoom / drag)
 // ════════════════════════════════════════════════════════════
 let VT = { x:40, y:40, scale:1 };
-let panning=false, panSM={x:0,y:0}, panST={x:0,y:0};
+let panning=false, panSM={x:0,y:0}, panST={x:0,y:0}, panMoved=false;
 let dragging=false, dragId=null, dragSM={x:0,y:0}, dragSP={x:0,y:0}, didDrag=false, lastDrag=false;
 let connDragging=false, connFromId=null, connFromSide=null;
 let pendingAddPos=null;
@@ -1142,7 +1142,7 @@ function onMD(e) {
     marqueeCur={...marqueeStart}; marqueeMoved=false; marquee=true;
     document.getElementById('flow-outer').classList.add('marqueeing');
   } else {
-    panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
+    panning=true; panMoved=false; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
     document.getElementById('flow-outer').classList.add('panning');
   }
 }
@@ -1178,7 +1178,9 @@ function onMM(e) {
     return;
   }
   if(panning){
-    VT.x=panST.x+(e.clientX-panSM.x); VT.y=panST.y+(e.clientY-panSM.y); applyVT();
+    const dx=e.clientX-panSM.x, dy=e.clientY-panSM.y;
+    if(Math.abs(dx)>4||Math.abs(dy)>4) panMoved=true;
+    VT.x=panST.x+dx; VT.y=panST.y+dy; applyVT();
     return;
   }
   if(marquee) {
@@ -1247,7 +1249,11 @@ function onMU(e) {
   } else {
     lastDrag=false;
   }
-  if(panning){ panning=false; document.getElementById('flow-outer').classList.remove('panning'); }
+  if(panning){
+    if(!panMoved){ selectedIds.clear(); updateSelectionClasses(); }
+    panMoved=false; panning=false;
+    document.getElementById('flow-outer').classList.remove('panning');
+  }
 }
 
 function onWheel(e) {
@@ -1489,8 +1495,8 @@ document.getElementById('list-view').addEventListener('click', e=>{
 // ════════════════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════════════════
-function init() {
-  if (!tryLoadFromHash()) initState();
+async function init() {
+  if (!(await tryLoadFromHash())) initState();
   if (Object.values(S.tasks).some(t=>t.x===undefined)) doLayout();
   if(history.length===0){ history=[JSON.stringify(S.tasks)]; historyIndex=0; }
   document.getElementById('modal-overlay').addEventListener('mousedown', e=>{
@@ -1513,13 +1519,30 @@ function init() {
 // URL EXPORT / SHARE
 // ════════════════════════════════════════════════════════════
 
-// URL-safe base64 helpers
-function b64enc(str) {
-  return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g,
-    (_, h) => String.fromCharCode(parseInt(h, 16))))
-    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+// URL helpers — v2 uses deflate-raw compression for ~3-4× smaller URLs.
+// v1 (uncompressed) links are still decoded for backward compatibility.
+async function compress(str) {
+  const bytes = new TextEncoder().encode(str);
+  const cs = new CompressionStream('deflate-raw');
+  const w = cs.writable.getWriter(); w.write(bytes); w.close();
+  const buf = await new Response(cs.readable).arrayBuffer();
+  const arr = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < arr.length; i += 8192)
+    bin += String.fromCharCode(...arr.subarray(i, i+8192));
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
-function b64dec(s) {
+
+async function decompress(s) {
+  const pad = s.length % 4 ? '='.repeat(4 - s.length % 4) : '';
+  const bin = atob(s.replace(/-/g,'+').replace(/_/g,'/') + pad);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  const ds = new DecompressionStream('deflate-raw');
+  const w = ds.writable.getWriter(); w.write(bytes); w.close();
+  return new Response(ds.readable).text();
+}
+
+function decodeV1(s) {
   const pad = s.length % 4 ? '='.repeat(4 - s.length % 4) : '';
   return decodeURIComponent(atob(s.replace(/-/g,'+').replace(/_/g,'/') + pad)
     .split('').map(c => '%' + c.charCodeAt(0).toString(16).padStart(2,'0')).join(''));
@@ -1527,11 +1550,13 @@ function b64dec(s) {
 
 // Called at startup — returns true if state was loaded from the URL hash.
 // The hash is a one-time import: after loading we clear it so reloads use localStorage.
-function tryLoadFromHash() {
+async function tryLoadFromHash() {
   try {
-    const m = location.hash.match(/^#v1=(.+)$/);
-    if (!m) return false;
-    const data = JSON.parse(b64dec(m[1]));
+    const mv2 = location.hash.match(/^#v2=(.+)$/);
+    const mv1 = !mv2 && location.hash.match(/^#v1=(.+)$/);
+    if (!mv2 && !mv1) return false;
+    const json = mv2 ? await decompress(mv2[1]) : decodeV1(mv1[1]);
+    const data = JSON.parse(json);
     if (!data?.tasks || typeof data.tasks !== 'object') return false;
     S = { view:'flow', hideCompleted: !!data.hideCompleted, tasks: data.tasks };
     persist();
@@ -1543,12 +1568,12 @@ function tryLoadFromHash() {
 // Encode current board state into a shareable URL and copy to clipboard.
 async function shareBoard() {
   const payload = { tasks: S.tasks, hideCompleted: S.hideCompleted };
-  const url = location.href.split('#')[0] + '#v1=' + b64enc(JSON.stringify(payload));
+  const enc = await compress(JSON.stringify(payload));
+  const url = location.href.split('#')[0] + '#v2=' + enc;
   try {
     await navigator.clipboard.writeText(url);
     showToast('Link copied to clipboard!');
   } catch(e) {
-    // Fallback: prompt with the URL for manual copy
     prompt('Copy this link:', url);
   }
 }
