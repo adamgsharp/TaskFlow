@@ -98,7 +98,7 @@
     }
 
     .flow-node {
-      position: absolute; width: 220px; height: 64px;
+      position: absolute; width: 220px; min-height: 64px; height: auto;
       border: 2px solid; border-radius: 10px;
       display: flex; align-items: center; padding: 10px 14px; gap: 10px;
       cursor: pointer; box-sizing: border-box; user-select: none;
@@ -114,7 +114,7 @@
     }
     .node-title {
       font-size: 13px; font-weight: 500; color: var(--text); flex: 1;
-      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3;
       -webkit-box-orient: vertical; line-height: 1.35;
     }
     .node-title.done { text-decoration: line-through; color: var(--text3); }
@@ -309,11 +309,13 @@
       border-radius: 3px; display: none;
     }
 
-    /* ── Inline rename ── */
+    /* ── Inline rename (textarea) ── */
     .node-title-input {
       flex: 1; font-size: 13px; font-weight: 500; color: var(--text);
       border: none; outline: none; background: transparent;
       line-height: 1.35; padding: 0; min-width: 0;
+      resize: none; overflow: hidden; display: block;
+      font-family: inherit; word-break: break-word;
     }
 
     /* ── Node pencil rename button ── */
@@ -504,6 +506,11 @@
 // CONSTANTS
 // ════════════════════════════════════════════════════════════
 const NW = 220, NH = 64, H_GAP = 110, V_GAP = 28, PAD = 50;
+
+// Actual rendered height of a node — may exceed NH for 3-line titles.
+function nodeH(taskId) {
+  return document.querySelector(`.flow-node[data-id="${taskId}"]`)?.offsetHeight || NH;
+}
 
 const SC = {
   completed: { bg:'#f8fafc', bd:'#cbd5e1', dot:'#94a3b8', txt:'#94a3b8' },
@@ -958,14 +965,14 @@ function makeNodeEl(task) {
 function computeEdgePath(pre, task) {
   if (portraitLayout) {
     // Vertical: from bottom-center of source to top-center of target
-    const sx = (pre.x||0)+NW/2, sy = (pre.y||0)+NH;
+    const sx = (pre.x||0)+NW/2, sy = (pre.y||0)+nodeH(pre.id);
     const tx = (task.x||0)+NW/2, ty = task.y||0;
     const cv = Math.max(40, Math.abs(ty-sy)*0.45);
     return `M${sx} ${sy} C${sx} ${sy+cv},${tx} ${ty-cv},${tx} ${ty}`;
   }
 
-  const sx = (pre.x||0)+NW, sy = (pre.y||0)+NH/2;
-  const tx = task.x||0,     ty = (task.y||0)+NH/2;
+  const sx = (pre.x||0)+NW, sy = (pre.y||0)+nodeH(pre.id)/2;
+  const tx = task.x||0,     ty = (task.y||0)+nodeH(task.id)/2;
 
   // Single-step edges (adjacent layers): direct bezier, no routing needed
   if (tx - sx <= NW + H_GAP + 10) {
@@ -983,8 +990,9 @@ function computeEdgePath(pre, task) {
     const cx = nx + NW/2;
     const frac = (cx - sx) / (tx - sx);
     const lineY = sy + frac * (ty - sy);
-    if (lineY >= ny - V_GAP*1.5 && lineY <= ny + NH + V_GAP*1.5) {
-      blockers.push({cx, ny, lineY});
+    const nh = nodeH(t.id);
+    if (lineY >= ny - V_GAP*1.5 && lineY <= ny + nh + V_GAP*1.5) {
+      blockers.push({cx, ny, lineY, nh});
     }
   });
 
@@ -996,10 +1004,10 @@ function computeEdgePath(pre, task) {
   blockers.sort((a,b) => a.cx - b.cx);
 
   const pts = [{x:sx, y:sy}];
-  for (const {cx, ny, lineY} of blockers) {
-    const wy = lineY < ny + NH/2
-      ? ny - V_GAP*1.5      // route above node
-      : ny + NH + V_GAP*1.5; // route below node
+  for (const {cx, ny, lineY, nh} of blockers) {
+    const wy = lineY < ny + nh/2
+      ? ny - V_GAP*1.5        // route above node
+      : ny + nh + V_GAP*1.5;  // route below node
     pts.push({x:cx, y:wy});
   }
   pts.push({x:tx, y:ty});
@@ -1149,7 +1157,7 @@ function fitView() {
   const ow=outer.clientWidth, oh=outer.clientHeight;
   const xs=tasks.map(t=>t.x||0), ys=tasks.map(t=>t.y||0);
   const x0=Math.min(...xs)-PAD, y0=Math.min(...ys)-PAD;
-  const x1=Math.max(...xs)+NW+PAD, y1=Math.max(...ys)+NH+PAD;
+  const x1=Math.max(...xs)+NW+PAD, y1=Math.max(...tasks.map(t=>(t.y||0)+nodeH(t.id)))+PAD;
   const cw=x1-x0, ch=y1-y0;
   const sc=Math.min(ow/cw, oh/ch, 1.5);
   VT = { scale:sc, x:(ow-cw*sc)/2-x0*sc, y:(oh-ch*sc)/2-y0*sc };
@@ -1180,12 +1188,16 @@ function startInlineEdit(taskId, isNew) {
   if(!task) return;
   const titleEl=document.querySelector(`.flow-node[data-id="${taskId}"] .node-title`);
   if(!titleEl) return;
-  const input=document.createElement('input');
+  const input=document.createElement('textarea');
   input.className='node-title-input';
   input.value=isNew?'':task.title;
   input.placeholder='Task name…';
+  input.rows=1;
+  const resizeInput=()=>{ input.style.height='auto'; input.style.height=input.scrollHeight+'px'; };
+  input.addEventListener('input', resizeInput);
   titleEl.replaceWith(input);
-  input.focus(); if(!isNew) input.select();
+  input.focus();
+  requestAnimationFrame(()=>{ resizeInput(); if(!isNew) input.select(); });
   let done=false;
   function finish(cancel) {
     if(done) return; done=true;
@@ -1243,8 +1255,8 @@ function onMD(e) {
     const pre = S.tasks[preId], dep = S.tasks[depId];
     if (pre && dep) {
       const cp = toCanvas(e.clientX, e.clientY);
-      const nearSrc = Math.hypot(cp.x-((pre.x||0)+NW), cp.y-((pre.y||0)+NH/2))
-                    < Math.hypot(cp.x-(dep.x||0),       cp.y-((dep.y||0)+NH/2));
+      const nearSrc = Math.hypot(cp.x-((pre.x||0)+NW), cp.y-((pre.y||0)+nodeH(pre.id)/2))
+                    < Math.hypot(cp.x-(dep.x||0),       cp.y-((dep.y||0)+nodeH(dep.id)/2));
       pre.dependents = pre.dependents.filter(d => d !== depId);
       dep.prereqs    = dep.prereqs.filter(p => p !== preId);
       persist(); renderFlow();
@@ -1352,7 +1364,7 @@ function onMU(e) {
       Object.values(S.tasks).forEach(t=>{
         if(S.hideCompleted&&t.completed) return;
         const tx=t.x||0, ty=t.y||0;
-        if(tx<mx2&&tx+NW>mx1&&ty<my2&&ty+NH>my1) selectedIds.add(t.id);
+        if(tx<mx2&&tx+NW>mx1&&ty<my2&&ty+nodeH(t.id)>my1) selectedIds.add(t.id);
       });
       updateSelectionClasses();
     } else {
