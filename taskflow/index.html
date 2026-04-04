@@ -431,6 +431,10 @@
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><rect x="1" y="1" width="3" height="11" rx="1" fill="currentColor"/><rect x="5.5" y="3" width="3" height="7" rx="1" fill="currentColor"/><rect x="10" y="5" width="3" height="3" rx="1" fill="currentColor"/></svg>
           Auto Arrange
         </button>
+        <button class="tb-btn" onclick="cleanUp()">
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 3.5h9M2 6.5h6M2 9.5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Clean Up
+        </button>
         <button class="tb-btn" onclick="fitView()">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><rect x="1" y="1" width="4" height="4" rx=".8" stroke="currentColor" stroke-width="1.5" fill="none"/><rect x="8" y="1" width="4" height="4" rx=".8" stroke="currentColor" stroke-width="1.5" fill="none"/><rect x="1" y="8" width="4" height="4" rx=".8" stroke="currentColor" stroke-width="1.5" fill="none"/><rect x="8" y="8" width="4" height="4" rx=".8" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
           Fit View
@@ -844,6 +848,77 @@ function toggleHideCompleted() {
 function autoArrange() {
   doLayout(); persist();
   if (S.view==='flow') { renderFlow(); fitView(); }
+}
+
+// Clean Up: snap columns aggressively, then smart-align Y within each column.
+// Smart Y rule: if the node's current Y is within 40% of minGap from a specific
+// neighbour's Y, the user was aligning with that neighbour → snap to it.
+// Otherwise, snap to the median Y of all visible neighbours (centering intent).
+function cleanUp() {
+  const allTasks = Object.values(S.tasks);
+  const tasks = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
+  if (!tasks.length) return;
+  const taskSet = new Set(tasks.map(t => t.id));
+  const minGap  = NH + V_GAP;
+  const snapThreshold = minGap * 0.4; // ~37px — within this of a neighbour → align with it
+
+  // 1. Snap each task's x to the nearest column.
+  tasks.forEach(t => {
+    const col = Math.round(((t.x || 0) - PAD) / (NW + H_GAP));
+    t.x = PAD + Math.max(0, col) * (NW + H_GAP);
+  });
+
+  // 2. Compute a Y target for each task using the smart alignment rule.
+  const targetY = {};
+  tasks.forEach(t => {
+    const currY = t.y || 0;
+    const neighYs = [
+      ...(t.prereqs    || []).filter(id => taskSet.has(id)),
+      ...(t.dependents || []).filter(id => taskSet.has(id))
+    ].map(id => S.tasks[id]?.y ?? null).filter(v => v !== null);
+
+    if (!neighYs.length) { targetY[t.id] = currY; return; }
+
+    // Closest neighbour Y and its distance.
+    let closestY = neighYs[0], closestDist = Math.abs(neighYs[0] - currY);
+    neighYs.forEach(y => {
+      const d = Math.abs(y - currY);
+      if (d < closestDist) { closestDist = d; closestY = y; }
+    });
+
+    // Median of all neighbour Ys.
+    const sorted = [...neighYs].sort((a, b) => a - b);
+    const m = Math.floor(sorted.length / 2);
+    const medianY = sorted.length % 2 ? sorted[m] : (sorted[m-1] + sorted[m]) / 2;
+
+    targetY[t.id] = closestDist < snapThreshold ? closestY : medianY;
+  });
+
+  // 3. Resolve vertical overlaps within each column.
+  const byCols = {};
+  tasks.forEach(t => { const k = t.x; (byCols[k] || (byCols[k] = [])).push(t); });
+
+  Object.values(byCols).forEach(col => {
+    col.sort((a, b) => (targetY[a.id] || 0) - (targetY[b.id] || 0));
+
+    // Forward: push down to honour minimum gap.
+    let floor = PAD - minGap;
+    col.forEach(t => {
+      t.y = Math.max(targetY[t.id] || PAD, floor + minGap);
+      floor = t.y;
+    });
+
+    // Backward: pull back up where headroom allows.
+    let ceil = Infinity;
+    for (let i = col.length - 1; i >= 0; i--) {
+      col[i].y = Math.min(col[i].y, ceil - minGap);
+      ceil = col[i].y;
+    }
+    col.forEach(t => { t.y = Math.max(PAD, t.y); });
+  });
+
+  persist();
+  if (S.view === 'flow') { renderFlow(); fitView(); }
 }
 
 // ════════════════════════════════════════════════════════════
