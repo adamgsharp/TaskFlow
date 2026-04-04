@@ -1010,13 +1010,21 @@ function renderEdges() {
 // ── List ──────────────────────────────────────────────────
 function listLayers() {
   const depth = {};
-  const tasks = Object.values(S.tasks);
-  const q = tasks.filter(t=>t.prereqs.length===0).map(t=>({id:t.id,d:0}));
+  const allTasks = Object.values(S.tasks);
+  // When Hide Done is on, compute layers relative to visible tasks only —
+  // completed prereqs are treated as "already done", so their dependents
+  // become roots (layer 0 = "Starting tasks").
+  const tasks = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
+  const taskSet = new Set(tasks.map(t => t.id));
+  const roots = S.hideCompleted
+    ? tasks.filter(t => t.prereqs.every(pid => !taskSet.has(pid)))
+    : tasks.filter(t => t.prereqs.length === 0);
+  const q = roots.map(t=>({id:t.id,d:0}));
   while (q.length) {
     const {id,d} = q.shift();
     if (depth[id]===undefined||d>depth[id]) {
       depth[id]=d;
-      (S.tasks[id]?.dependents||[]).forEach(dep=>{ if(S.tasks[dep]) q.push({id:dep,d:d+1}); });
+      (S.tasks[id]?.dependents||[]).filter(dep=>taskSet.has(dep)).forEach(dep=>q.push({id:dep,d:d+1}));
     }
   }
   tasks.forEach(t=>{ if(depth[t.id]===undefined) depth[t.id]=0; });
@@ -1097,7 +1105,7 @@ function toCanvas(sx, sy) {
 }
 
 function fitView() {
-  const tasks=Object.values(S.tasks);
+  const tasks=Object.values(S.tasks).filter(t=>!S.hideCompleted||!t.completed);
   if(!tasks.length) return;
   const outer=document.getElementById('flow-outer');
   if(!outer) return;
