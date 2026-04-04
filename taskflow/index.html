@@ -1265,6 +1265,7 @@ function onMD(e) {
   }
   if(e.target.closest('[data-editname]')) return; // pencil handled on click
   if(e.target.dataset.cb) return;                 // checkbox handled on click
+  if(e.target.classList.contains('node-title-input')) return; // let input handle its own selection
   const nd = e.target.closest('.flow-node');
   if(nd && e.button === 0) {
     dragging=true; didDrag=false; dragId=nd.dataset.id;
