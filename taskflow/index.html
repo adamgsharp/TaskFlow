@@ -609,71 +609,127 @@ function esc(s) {
 // LAYOUT
 // ════════════════════════════════════════════════════════════
 function doLayout() {
-  const tasks = Object.values(S.tasks);
-  if (!tasks.length) return;
+  const allTasks = Object.values(S.tasks);
+  if (!allTasks.length) return;
 
-  // 1. Longest-path layer assignment
+  // When Hide Done is on, lay out only visible (non-completed) tasks.
+  // Available tasks (all prereqs finished) become layer 0 — the leftmost column.
+  // When Hide Done is off, include every task with standard longest-path layers.
+  const tasks   = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
+  const taskSet = new Set(tasks.map(t => t.id));
+
+  // Visible edge helpers — only traverse edges between laid-out tasks
+  const vPre = id => (S.tasks[id]?.prereqs    ||[]).filter(p => taskSet.has(p));
+  const vDep = id => (S.tasks[id]?.dependents ||[]).filter(d => taskSet.has(d));
+
+  // 1. Layer assignment
   const layers = {};
-  const q = tasks.filter(t => t.prereqs.length === 0).map(t => ({id:t.id, d:0}));
+  // Roots: when hiding done, tasks whose prereqs are ALL completed (not in taskSet).
+  //        otherwise, tasks with zero prereqs.
+  const roots = S.hideCompleted
+    ? tasks.filter(t => t.prereqs.every(pid => !taskSet.has(pid)))
+    : tasks.filter(t => t.prereqs.length === 0);
+
+  const q = roots.map(t => ({id:t.id, d:0}));
   while (q.length) {
     const {id, d} = q.shift();
     if (layers[id] === undefined || d > layers[id]) {
       layers[id] = d;
-      (S.tasks[id]?.dependents||[]).forEach(dep => { if (S.tasks[dep]) q.push({id:dep, d:d+1}); });
+      vDep(id).forEach(dep => q.push({id:dep, d:d+1}));
     }
   }
   tasks.forEach(t => { if (layers[t.id] === undefined) layers[t.id] = 0; });
 
   // 2. Group by layer
   const byLayer = {};
-  Object.entries(layers).forEach(([id, d]) => { (byLayer[d]||(byLayer[d]=[])).push(id); });
+  tasks.forEach(t => { const d=layers[t.id]; (byLayer[d]||(byLayer[d]=[])).push(t.id); });
   const layerNums = Object.keys(byLayer).map(Number).sort((a,b) => a-b);
 
-  // 3. Barycentric crossing minimisation — 4 forward+backward passes
+  // 3. Barycentric crossing minimisation — 4 forward+backward passes (visible edges only)
   function med(arr) {
     if (!arr.length) return 0;
-    const s = [...arr].sort((a,b) => a-b);
-    const m = Math.floor(s.length / 2);
-    return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+    const s = [...arr].sort((a,b) => a-b), m = Math.floor(s.length/2);
+    return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
   }
   for (let pass = 0; pass < 4; pass++) {
     for (let li = 1; li < layerNums.length; li++) {
       const pos = {}; byLayer[layerNums[li-1]].forEach((id,i) => { pos[id]=i; });
-      byLayer[layerNums[li]].sort((a,b) => {
-        const pa = (S.tasks[a]?.prereqs||[]).map(p=>pos[p]).filter(v=>v!=null);
-        const pb = (S.tasks[b]?.prereqs||[]).map(p=>pos[p]).filter(v=>v!=null);
-        return med(pa) - med(pb);
-      });
+      byLayer[layerNums[li]].sort((a,b) =>
+        med(vPre(a).map(p=>pos[p]).filter(v=>v!=null)) -
+        med(vPre(b).map(p=>pos[p]).filter(v=>v!=null)));
     }
     for (let li = layerNums.length-2; li >= 0; li--) {
       const pos = {}; byLayer[layerNums[li+1]].forEach((id,i) => { pos[id]=i; });
-      byLayer[layerNums[li]].sort((a,b) => {
-        const da = (S.tasks[a]?.dependents||[]).map(d=>pos[d]).filter(v=>v!=null);
-        const db = (S.tasks[b]?.dependents||[]).map(d=>pos[d]).filter(v=>v!=null);
-        return med(da) - med(db);
-      });
+      byLayer[layerNums[li]].sort((a,b) =>
+        med(vDep(a).map(d=>pos[d]).filter(v=>v!=null)) -
+        med(vDep(b).map(d=>pos[d]).filter(v=>v!=null)));
     }
   }
 
-  // 4. Assign pixel positions.
-  //    Portrait mode (phone held vertically): layers go top→bottom, nodes spread left→right.
-  //    Landscape mode: layers go left→right, nodes spread top→bottom.
+  // 4. Orientation
   const portrait = window.innerWidth < window.innerHeight && window.innerWidth < 640;
   portraitLayout = portrait;
   const canvas = document.getElementById('flow-canvas');
   if (canvas) canvas.classList.toggle('portrait-layout', portrait);
 
   if (portrait) {
+    // Portrait: layers top→bottom, nodes spread left→right — no gravity pass needed
     Object.entries(byLayer).forEach(([dl, ids]) => {
       const y = PAD + parseInt(dl) * (NH + H_GAP);
       ids.forEach((id, i) => { S.tasks[id].x = PAD + i*(NW+H_GAP); S.tasks[id].y = y; });
     });
-  } else {
-    Object.entries(byLayer).forEach(([dl, ids]) => {
-      const x = PAD + parseInt(dl) * (NW + H_GAP);
-      ids.forEach((id, i) => { S.tasks[id].x = x; S.tasks[id].y = PAD + i*(NH+V_GAP); });
-    });
+    return;
   }
+
+  // 5. Gravity-based Y positioning (landscape only).
+  //    After barycentric ordering fixes the vertical ORDER, iteratively pull each
+  //    node toward the median Y of its visible neighbours so connected nodes
+  //    float to the same height and gaps open up where edges need to pass through.
+  const minGap = NH + V_GAP;
+
+  // Seed with even spacing so the first gravity pass has a stable reference
+  const yPos = {};
+  Object.entries(byLayer).forEach(([dl, ids]) => {
+    ids.forEach((id, i) => { yPos[id] = PAD + i * minGap; });
+  });
+
+  for (let iter = 0; iter < 8; iter++) {
+    const nextY = {};
+    Object.entries(byLayer).forEach(([dl, ids]) => {
+      // Gravity targets: median Y of all visible neighbours across adjacent layers
+      const targets = ids.map(id => {
+        const nys = [...vPre(id), ...vDep(id)]
+          .map(nid => yPos[nid]).filter(v => v !== undefined);
+        if (!nys.length) return {id, target: yPos[id]};
+        const s = nys.sort((a,b)=>a-b), m = Math.floor(s.length/2);
+        return {id, target: s.length%2 ? s[m] : (s[m-1]+s[m])/2};
+      });
+
+      // Forward pass: place at target but push down to honour minimum gap
+      let floor = PAD - minGap;
+      const placed = targets.map(({id, target}) => {
+        const y = Math.max(target, floor + minGap);
+        floor = y;
+        return {id, y};
+      });
+
+      // Backward pass: pull back up where headroom allows
+      let ceil = Infinity;
+      for (let i = placed.length-1; i >= 0; i--) {
+        placed[i].y = Math.min(placed[i].y, ceil - minGap);
+        ceil = placed[i].y;
+      }
+
+      placed.forEach(({id, y}) => { nextY[id] = Math.max(PAD, y); });
+    });
+    Object.assign(yPos, nextY);
+  }
+
+  // 6. Write final positions
+  Object.entries(byLayer).forEach(([dl, ids]) => {
+    const x = PAD + parseInt(dl) * (NW + H_GAP);
+    ids.forEach(id => { S.tasks[id].x = x; S.tasks[id].y = yPos[id]; });
+  });
 }
 
 // ════════════════════════════════════════════════════════════
