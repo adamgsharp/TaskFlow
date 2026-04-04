@@ -884,9 +884,10 @@ function cleanUp() {
 
   // 3. Snap each task — x to nearest column, y to nearest half-step grid point.
   tasks.forEach(t => {
-    const cx = t.x || 0, cy = t.y || 0;
+    const cx = t.x || 0;
+    const centerY = (t.y || 0) + nodeH(t.id) / 2;
     t.x = colXs.reduce((best, x) => Math.abs(x - cx) < Math.abs(best - cx) ? x : best);
-    t.y = Math.round((cy - PAD) / halfStep) * halfStep + PAD;
+    t.y = Math.round((centerY - PAD) / halfStep) * halfStep + PAD - nodeH(t.id) / 2;
   });
 
   persist();
