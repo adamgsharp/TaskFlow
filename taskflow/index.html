@@ -499,6 +499,7 @@
   <path id="ghost-path" stroke="#6366f1" stroke-width="2.5" fill="none" stroke-dasharray="7 4" opacity="0.85"/>
 </svg>
 
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
 <script>
 'use strict';
 
@@ -617,168 +618,47 @@ function esc(s) {
 }
 
 // ════════════════════════════════════════════════════════════
-// LAYOUT
+// LAYOUT  (powered by Dagre — proper Sugiyama implementation)
 // ════════════════════════════════════════════════════════════
 function doLayout() {
   const allTasks = Object.values(S.tasks);
   if (!allTasks.length) return;
 
-  // When Hide Done is on, lay out only visible (non-completed) tasks.
-  // Available tasks (all prereqs finished) become layer 0 — the leftmost column.
-  // When Hide Done is off, include every task with standard longest-path layers.
+  // When Hide Done is on, lay out only visible tasks.
+  // Tasks whose every prereq is completed become roots (layer 0).
   const tasks   = S.hideCompleted ? allTasks.filter(t => !t.completed) : allTasks;
   const taskSet = new Set(tasks.map(t => t.id));
 
-  // Visible edge helpers — only traverse edges between laid-out tasks
-  const vPre = id => (S.tasks[id]?.prereqs    ||[]).filter(p => taskSet.has(p));
-  const vDep = id => (S.tasks[id]?.dependents ||[]).filter(d => taskSet.has(d));
-
-  // 1. Layer assignment
-  const layers = {};
-  // Roots: when hiding done, tasks whose prereqs are ALL completed (not in taskSet).
-  //        otherwise, tasks with zero prereqs.
-  const roots = S.hideCompleted
-    ? tasks.filter(t => t.prereqs.every(pid => !taskSet.has(pid)))
-    : tasks.filter(t => t.prereqs.length === 0);
-
-  const q = roots.map(t => ({id:t.id, d:0}));
-  while (q.length) {
-    const {id, d} = q.shift();
-    if (layers[id] === undefined || d > layers[id]) {
-      layers[id] = d;
-      vDep(id).forEach(dep => q.push({id:dep, d:d+1}));
-    }
-  }
-  tasks.forEach(t => { if (layers[t.id] === undefined) layers[t.id] = 0; });
-
-  // 2. Group by layer
-  const byLayer = {};
-  tasks.forEach(t => { const d=layers[t.id]; (byLayer[d]||(byLayer[d]=[])).push(t.id); });
-  const layerNums = Object.keys(byLayer).map(Number).sort((a,b) => a-b);
-
-  // 3. Barycentric crossing minimisation — 4 forward+backward passes (visible edges only)
-  function med(arr) {
-    if (!arr.length) return 0;
-    const s = [...arr].sort((a,b) => a-b), m = Math.floor(s.length/2);
-    return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
-  }
-  for (let pass = 0; pass < 4; pass++) {
-    for (let li = 1; li < layerNums.length; li++) {
-      const pos = {}; byLayer[layerNums[li-1]].forEach((id,i) => { pos[id]=i; });
-      byLayer[layerNums[li]].sort((a,b) =>
-        med(vPre(a).map(p=>pos[p]).filter(v=>v!=null)) -
-        med(vPre(b).map(p=>pos[p]).filter(v=>v!=null)));
-    }
-    for (let li = layerNums.length-2; li >= 0; li--) {
-      const pos = {}; byLayer[layerNums[li+1]].forEach((id,i) => { pos[id]=i; });
-      byLayer[layerNums[li]].sort((a,b) =>
-        med(vDep(a).map(d=>pos[d]).filter(v=>v!=null)) -
-        med(vDep(b).map(d=>pos[d]).filter(v=>v!=null)));
-    }
-  }
-
-  // 3b. Pairwise swap refinement — after the median heuristic gets us close,
-  //     explicitly count crossings and swap adjacent nodes whenever a swap
-  //     reduces the total. Repeat until no swap helps (up to 20 sweeps).
-  function countCrossings(layer, adjLayer, edgeFn) {
-    if (!adjLayer || !adjLayer.length) return 0;
-    const pos = {};
-    adjLayer.forEach((id, i) => { pos[id] = i; });
-    const edges = [];
-    layer.forEach((id, i) => {
-      edgeFn(id).forEach(nid => { if (pos[nid] !== undefined) edges.push([i, pos[nid]]); });
-    });
-    let c = 0;
-    for (let i = 0; i < edges.length-1; i++)
-      for (let j = i+1; j < edges.length; j++)
-        if ((edges[i][0]-edges[j][0]) * (edges[i][1]-edges[j][1]) < 0) c++;
-    return c;
-  }
-  for (let sweep = 0; sweep < 20; sweep++) {
-    let anyImproved = false;
-    for (let li = 0; li < layerNums.length; li++) {
-      const ids = byLayer[layerNums[li]];
-      if (ids.length < 2) continue;
-      const L = li > 0                    ? byLayer[layerNums[li-1]] : [];
-      const R = li < layerNums.length-1   ? byLayer[layerNums[li+1]] : [];
-      let swapped = true;
-      while (swapped) {
-        swapped = false;
-        for (let i = 0; i < ids.length-1; i++) {
-          const before = countCrossings(ids,L,vPre) + countCrossings(ids,R,vDep);
-          [ids[i], ids[i+1]] = [ids[i+1], ids[i]];
-          const after  = countCrossings(ids,L,vPre) + countCrossings(ids,R,vDep);
-          if (after < before) { swapped = true; anyImproved = true; }
-          else [ids[i], ids[i+1]] = [ids[i+1], ids[i]]; // revert
-        }
-      }
-    }
-    if (!anyImproved) break;
-  }
-
-  // 4. Orientation
+  // Orientation
   const portrait = window.innerWidth < window.innerHeight && window.innerWidth < 640;
   portraitLayout = portrait;
   const canvas = document.getElementById('flow-canvas');
   if (canvas) canvas.classList.toggle('portrait-layout', portrait);
 
-  if (portrait) {
-    // Portrait: layers top→bottom, nodes spread left→right — no gravity pass needed
-    Object.entries(byLayer).forEach(([dl, ids]) => {
-      const y = PAD + parseInt(dl) * (NH + H_GAP);
-      ids.forEach((id, i) => { S.tasks[id].x = PAD + i*(NW+H_GAP); S.tasks[id].y = y; });
-    });
-    return;
-  }
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({
+    rankdir:  portrait ? 'TB' : 'LR',
+    ranksep:  portrait ? H_GAP : H_GAP,   // gap between columns / ranks
+    nodesep:  portrait ? H_GAP : V_GAP,   // gap between nodes in the same rank
+    marginx:  PAD,
+    marginy:  PAD,
+    acyclicer: 'greedy',
+    ranker:   'network-simplex',
+  });
+  g.setDefaultEdgeLabel(() => ({}));
 
-  // 5. Gravity-based Y positioning (landscape only).
-  //    After barycentric ordering fixes the vertical ORDER, iteratively pull each
-  //    node toward the median Y of its visible neighbours so connected nodes
-  //    float to the same height and gaps open up where edges need to pass through.
-  const minGap = NH + V_GAP;
-
-  // Seed with even spacing so the first gravity pass has a stable reference
-  const yPos = {};
-  Object.entries(byLayer).forEach(([dl, ids]) => {
-    ids.forEach((id, i) => { yPos[id] = PAD + i * minGap; });
+  tasks.forEach(t => g.setNode(t.id, { width: NW, height: NH }));
+  tasks.forEach(t => {
+    t.prereqs.filter(pid => taskSet.has(pid)).forEach(pid => g.setEdge(pid, t.id));
   });
 
-  for (let iter = 0; iter < 8; iter++) {
-    const nextY = {};
-    Object.entries(byLayer).forEach(([dl, ids]) => {
-      // Gravity targets: median Y of all visible neighbours across adjacent layers
-      const targets = ids.map(id => {
-        const nys = [...vPre(id), ...vDep(id)]
-          .map(nid => yPos[nid]).filter(v => v !== undefined);
-        if (!nys.length) return {id, target: yPos[id]};
-        const s = nys.sort((a,b)=>a-b), m = Math.floor(s.length/2);
-        return {id, target: s.length%2 ? s[m] : (s[m-1]+s[m])/2};
-      });
+  dagre.layout(g);
 
-      // Forward pass: place at target but push down to honour minimum gap
-      let floor = PAD - minGap;
-      const placed = targets.map(({id, target}) => {
-        const y = Math.max(target, floor + minGap);
-        floor = y;
-        return {id, y};
-      });
-
-      // Backward pass: pull back up where headroom allows
-      let ceil = Infinity;
-      for (let i = placed.length-1; i >= 0; i--) {
-        placed[i].y = Math.min(placed[i].y, ceil - minGap);
-        ceil = placed[i].y;
-      }
-
-      placed.forEach(({id, y}) => { nextY[id] = Math.max(PAD, y); });
-    });
-    Object.assign(yPos, nextY);
-  }
-
-  // 6. Write final positions
-  Object.entries(byLayer).forEach(([dl, ids]) => {
-    const x = PAD + parseInt(dl) * (NW + H_GAP);
-    ids.forEach(id => { S.tasks[id].x = x; S.tasks[id].y = yPos[id]; });
+  // Dagre gives centre coordinates; our tasks store the top-left corner.
+  tasks.forEach(t => {
+    const n = g.node(t.id);
+    S.tasks[t.id].x = Math.round(n.x - NW / 2);
+    S.tasks[t.id].y = Math.round(n.y - NH / 2);
   });
 }
 
