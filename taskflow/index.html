@@ -1131,7 +1131,7 @@ function renderList() {
 // ════════════════════════════════════════════════════════════
 let VT = { x:40, y:40, scale:1 };
 let panning=false, panSM={x:0,y:0}, panST={x:0,y:0}, panMoved=false;
-let dragging=false, dragId=null, dragSM={x:0,y:0}, dragSP={x:0,y:0}, didDrag=false, lastDrag=false;
+let dragging=false, dragId=null, dragSM={x:0,y:0}, dragStartPositions={}, didDrag=false, lastDrag=false;
 let connDragging=false, connFromId=null, connFromSide=null;
 let pendingAddPos=null;
 let selectedIds=new Set();
@@ -1282,7 +1282,10 @@ function onMD(e) {
   if(nd && e.button === 0) {
     dragging=true; didDrag=false; dragId=nd.dataset.id;
     dragSM=toCanvas(e.clientX,e.clientY);
-    const t=S.tasks[dragId]; dragSP={x:t.x||0,y:t.y||0};
+    // If the dragged node is selected, move the whole selection; otherwise just this node.
+    const dragIds = selectedIds.has(dragId) ? [...selectedIds] : [dragId];
+    dragStartPositions={};
+    dragIds.forEach(id=>{ const t=S.tasks[id]; if(t) dragStartPositions[id]={x:t.x||0,y:t.y||0}; });
     nd.classList.add('dragging'); e.preventDefault(); return;
   }
   // Empty canvas:
@@ -1323,9 +1326,12 @@ function onMM(e) {
     const dx=cp.x-dragSM.x, dy=cp.y-dragSM.y;
     if(Math.abs(dx)>2||Math.abs(dy)>2) didDrag=true;
     if(didDrag) {
-      const t=S.tasks[dragId]; t.x=dragSP.x+dx; t.y=dragSP.y+dy;
-      const nd=document.querySelector(`.flow-node[data-id="${dragId}"]`);
-      if(nd){nd.style.left=t.x+'px'; nd.style.top=t.y+'px';}
+      Object.entries(dragStartPositions).forEach(([id,sp])=>{
+        const t=S.tasks[id]; if(!t) return;
+        t.x=sp.x+dx; t.y=sp.y+dy;
+        const el=document.querySelector(`.flow-node[data-id="${id}"]`);
+        if(el){el.style.left=t.x+'px'; el.style.top=t.y+'px';}
+      });
       renderEdges();
     }
     return;
@@ -1396,9 +1402,10 @@ function onMU(e) {
   if(dragging){
     lastDrag=didDrag;
     if(didDrag) persist();
-    const nd=dragId&&document.querySelector(`.flow-node[data-id="${dragId}"]`);
-    if(nd) nd.classList.remove('dragging');
-    dragging=false; didDrag=false; dragId=null;
+    Object.keys(dragStartPositions).forEach(id=>{
+      document.querySelector(`.flow-node[data-id="${id}"]`)?.classList.remove('dragging');
+    });
+    dragging=false; didDrag=false; dragId=null; dragStartPositions={};
   } else {
     lastDrag=false;
   }
