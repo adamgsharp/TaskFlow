@@ -891,7 +891,7 @@ function cleanUp() {
   });
 
   persist();
-  if (S.view === 'flow') { renderFlow(); fitView(); }
+  if (S.view === 'flow') { renderFlow(); if (!selectedIds.size) fitView(); }
 }
 
 // ════════════════════════════════════════════════════════════
