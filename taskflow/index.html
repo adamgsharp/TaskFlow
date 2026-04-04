@@ -84,7 +84,18 @@
     body.pan-mode #flow-outer { cursor: grab; }
     body.pan-mode #flow-outer.panning { cursor: grabbing; }
     #flow-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
-    #edges-svg { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+    #edges-svg { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; }
+    .edge-hit { cursor: crosshair; }
+
+    /* Portrait auto-arrange: ports on top/bottom of nodes */
+    .portrait-layout .port-left {
+      left: 50%; right: auto; top: -7px; bottom: auto;
+      transform: translateX(-50%);
+    }
+    .portrait-layout .port-right {
+      right: auto; left: 50%; top: auto; bottom: -7px;
+      transform: translateX(-50%);
+    }
 
     .flow-node {
       position: absolute; width: 220px; height: 64px;
@@ -510,7 +521,7 @@ function initState() {
 // HISTORY (undo / redo)
 // ════════════════════════════════════════════════════════════
 let history = [], historyIndex = -1, skipHistory = false;
-let edgeWaypoints = {}; // set by doLayout, used by renderEdges
+let portraitLayout = false; // set by doLayout, used by renderEdges + computeEdgePath
 
 function persist() {
   const json = JSON.stringify(S);
@@ -582,7 +593,7 @@ function doLayout() {
   const tasks = Object.values(S.tasks);
   if (!tasks.length) return;
 
-  // 1. Assign longest-path layer to each node
+  // 1. Longest-path layer assignment
   const layers = {};
   const q = tasks.filter(t => t.prereqs.length === 0).map(t => ({id:t.id, d:0}));
   while (q.length) {
@@ -594,85 +605,56 @@ function doLayout() {
   }
   tasks.forEach(t => { if (layers[t.id] === undefined) layers[t.id] = 0; });
 
-  // 2. Group real nodes by layer
+  // 2. Group by layer
   const byLayer = {};
   Object.entries(layers).forEach(([id, d]) => { (byLayer[d]||(byLayer[d]=[])).push(id); });
-
-  // 3. Insert dummy nodes for edges that span > 1 layer.
-  //    Dummies carry long edges through intermediate layers so crossing
-  //    minimization can route them cleanly around real nodes.
-  edgeWaypoints = {};
-  let dSeq = 0;
-  const dPre = {}, dPost = {}; // adjacency for dummy nodes only
-  tasks.forEach(task => {
-    task.prereqs.forEach(pid => {
-      if (!S.tasks[pid]) return;
-      const srcL = layers[pid], dstL = layers[task.id];
-      if (dstL - srcL <= 1) return;
-      const chain = [];
-      for (let l = srcL + 1; l < dstL; l++) {
-        const dId = `__d${dSeq++}`;
-        layers[dId] = l;
-        (byLayer[l]||(byLayer[l]=[])).push(dId);
-        chain.push(dId);
-      }
-      for (let i = 0; i < chain.length; i++) {
-        dPre[chain[i]]  = [i === 0 ? pid : chain[i-1]];
-        dPost[chain[i]] = [i === chain.length-1 ? task.id : chain[i+1]];
-      }
-      edgeWaypoints[`${pid}>${task.id}`] = chain; // filled with coords after layout
-    });
-  });
-
   const layerNums = Object.keys(byLayer).map(Number).sort((a,b) => a-b);
 
-  // 4. Barycentric crossing minimisation — 4 forward+backward passes.
-  //    Dummy nodes participate just like real nodes.
+  // 3. Barycentric crossing minimisation — 4 forward+backward passes
   function med(arr) {
     if (!arr.length) return 0;
     const s = [...arr].sort((a,b) => a-b);
     const m = Math.floor(s.length / 2);
     return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
   }
-  function preOf(id)  { return dPre[id]  || (S.tasks[id]?.prereqs    || []); }
-  function postOf(id) { return dPost[id] || (S.tasks[id]?.dependents || []); }
-
   for (let pass = 0; pass < 4; pass++) {
     for (let li = 1; li < layerNums.length; li++) {
       const pos = {}; byLayer[layerNums[li-1]].forEach((id,i) => { pos[id]=i; });
       byLayer[layerNums[li]].sort((a,b) => {
-        const pa = preOf(a).map(p=>pos[p]).filter(v=>v!=null);
-        const pb = preOf(b).map(p=>pos[p]).filter(v=>v!=null);
+        const pa = (S.tasks[a]?.prereqs||[]).map(p=>pos[p]).filter(v=>v!=null);
+        const pb = (S.tasks[b]?.prereqs||[]).map(p=>pos[p]).filter(v=>v!=null);
         return med(pa) - med(pb);
       });
     }
     for (let li = layerNums.length-2; li >= 0; li--) {
       const pos = {}; byLayer[layerNums[li+1]].forEach((id,i) => { pos[id]=i; });
       byLayer[layerNums[li]].sort((a,b) => {
-        const da = postOf(a).map(d=>pos[d]).filter(v=>v!=null);
-        const db = postOf(b).map(d=>pos[d]).filter(v=>v!=null);
+        const da = (S.tasks[a]?.dependents||[]).map(d=>pos[d]).filter(v=>v!=null);
+        const db = (S.tasks[b]?.dependents||[]).map(d=>pos[d]).filter(v=>v!=null);
         return med(da) - med(db);
       });
     }
   }
 
-  // 5. Assign pixel coordinates; record dummy positions as waypoints.
-  const dPos = {};
-  Object.entries(byLayer).forEach(([dl, ids]) => {
-    const x = PAD + parseInt(dl) * (NW + H_GAP);
-    ids.forEach((id, i) => {
-      const y = PAD + i*(NH+V_GAP);
-      if (id.startsWith('__d')) { dPos[id] = {x, y}; }
-      else { S.tasks[id].x = x; S.tasks[id].y = y; }
+  // 4. Assign pixel positions.
+  //    Portrait mode (phone held vertically): layers go top→bottom, nodes spread left→right.
+  //    Landscape mode: layers go left→right, nodes spread top→bottom.
+  const portrait = window.innerWidth < window.innerHeight && window.innerWidth < 640;
+  portraitLayout = portrait;
+  const canvas = document.getElementById('flow-canvas');
+  if (canvas) canvas.classList.toggle('portrait-layout', portrait);
+
+  if (portrait) {
+    Object.entries(byLayer).forEach(([dl, ids]) => {
+      const y = PAD + parseInt(dl) * (NH + H_GAP);
+      ids.forEach((id, i) => { S.tasks[id].x = PAD + i*(NW+H_GAP); S.tasks[id].y = y; });
     });
-  });
-  // Replace dummy id chains with actual canvas coordinates
-  Object.keys(edgeWaypoints).forEach(k => {
-    edgeWaypoints[k] = edgeWaypoints[k].map(dId => ({
-      x: dPos[dId].x + NW/2,
-      y: dPos[dId].y + NH/2
-    }));
-  });
+  } else {
+    Object.entries(byLayer).forEach(([dl, ids]) => {
+      const x = PAD + parseInt(dl) * (NW + H_GAP);
+      ids.forEach((id, i) => { S.tasks[id].x = x; S.tasks[id].y = PAD + i*(NH+V_GAP); });
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -820,6 +802,66 @@ function makeNodeEl(task) {
   return div;
 }
 
+// Compute a bezier path for an edge, dynamically routing around any blocking nodes.
+// Works in both landscape (left→right) and portrait (top→bottom) layouts.
+function computeEdgePath(pre, task) {
+  if (portraitLayout) {
+    // Vertical: from bottom-center of source to top-center of target
+    const sx = (pre.x||0)+NW/2, sy = (pre.y||0)+NH;
+    const tx = (task.x||0)+NW/2, ty = task.y||0;
+    const cv = Math.max(40, Math.abs(ty-sy)*0.45);
+    return `M${sx} ${sy} C${sx} ${sy+cv},${tx} ${ty-cv},${tx} ${ty}`;
+  }
+
+  const sx = (pre.x||0)+NW, sy = (pre.y||0)+NH/2;
+  const tx = task.x||0,     ty = (task.y||0)+NH/2;
+
+  // Single-step edges (adjacent layers): direct bezier, no routing needed
+  if (tx - sx <= NW + H_GAP + 10) {
+    const cv = Math.max(55, Math.abs(tx-sx)*0.45);
+    return `M${sx} ${sy} C${sx+cv} ${sy},${tx-cv} ${ty},${tx} ${ty}`;
+  }
+
+  // Long edges: find nodes in intermediate x-range that the straight line would hit
+  const blockers = [];
+  Object.values(S.tasks).forEach(t => {
+    if (t.id === pre.id || t.id === task.id) return;
+    if (S.hideCompleted && t.completed) return;
+    const nx = t.x||0, ny = t.y||0;
+    if (nx + NW <= sx || nx >= tx) return; // outside x corridor
+    const cx = nx + NW/2;
+    const frac = (cx - sx) / (tx - sx);
+    const lineY = sy + frac * (ty - sy);
+    if (lineY >= ny - V_GAP/2 && lineY <= ny + NH + V_GAP/2) {
+      blockers.push({cx, ny, lineY});
+    }
+  });
+
+  if (!blockers.length) {
+    const cv = Math.max(55, Math.abs(tx-sx)*0.45);
+    return `M${sx} ${sy} C${sx+cv} ${sy},${tx-cv} ${ty},${tx} ${ty}`;
+  }
+
+  blockers.sort((a,b) => a.cx - b.cx);
+
+  const pts = [{x:sx, y:sy}];
+  for (const {cx, ny, lineY} of blockers) {
+    const wy = lineY < ny + NH/2
+      ? ny - V_GAP/2      // route above node
+      : ny + NH + V_GAP/2; // route below node
+    pts.push({x:cx, y:wy});
+  }
+  pts.push({x:tx, y:ty});
+
+  let d = `M${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length-1; i++) {
+    const p1=pts[i], p2=pts[i+1];
+    const cv = Math.max(55, Math.abs(p2.x-p1.x)*0.45);
+    d += ` C${p1.x+cv} ${p1.y},${p2.x-cv} ${p2.y},${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
 function renderEdges() {
   const svg = document.getElementById('edges-svg');
 
@@ -834,24 +876,12 @@ function renderEdges() {
       if (seen.has(eid)) return;
       seen.add(eid);
 
-      const sx = (pre.x||0)+NW, sy = (pre.y||0)+NH/2;
-      const tx = task.x||0,     ty = (task.y||0)+NH/2;
-      const wps = edgeWaypoints[eid] || [];
-      let d;
-      if (!wps.length) {
-        const cv = Math.max(55, Math.abs(tx-sx)*0.45);
-        d = `M${sx} ${sy} C${sx+cv} ${sy},${tx-cv} ${ty},${tx} ${ty}`;
-      } else {
-        const pts = [{x:sx,y:sy}, ...wps, {x:tx,y:ty}];
-        d = `M${pts[0].x} ${pts[0].y}`;
-        for (let i = 0; i < pts.length-1; i++) {
-          const p1=pts[i], p2=pts[i+1];
-          const cv = Math.max(55, Math.abs(p2.x-p1.x)*0.45);
-          d += ` C${p1.x+cv} ${p1.y},${p2.x-cv} ${p2.y},${p2.x} ${p2.y}`;
-        }
-      }
+      const d = computeEdgePath(pre, task);
       const cls = pre.completed ? ' class="edge-done"' : '';
-      paths += `<path d="${d}" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ab)"${cls}/>`;
+      // Visual path (no pointer events — hit path below handles interaction)
+      paths += `<path d="${d}" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ab)"${cls} pointer-events="none"/>`;
+      // Invisible wide hit path for disconnect-by-drag
+      paths += `<path d="${d}" stroke="transparent" stroke-width="18" fill="none" class="edge-hit" data-pre="${pid}" data-dep="${task.id}" pointer-events="stroke"/>`;
     });
   });
 
@@ -1045,42 +1075,56 @@ function onMD(e) {
   const activeEdit = document.querySelector('.node-title-input');
   if (activeEdit && !activeEdit.contains(e.target)) {
     activeEdit.blur();
-    if (!e.target.closest('.flow-node')) return; // canvas click consumed
+    if (!e.target.closest('.flow-node')) return; // canvas click consumed by edit-commit
   }
 
-  // Middle button = pan (like spacebar+drag)
-  if (e.button === 1) {
-    e.preventDefault();
-    panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
-    document.getElementById('flow-outer').classList.add('panning');
-    return;
+  // Edge disconnect: left-click on a hit path — pull the edge off the nearer endpoint
+  if (e.target.classList?.contains('edge-hit') && e.button === 0) {
+    const preId = e.target.dataset.pre, depId = e.target.dataset.dep;
+    const pre = S.tasks[preId], dep = S.tasks[depId];
+    if (pre && dep) {
+      const cp = toCanvas(e.clientX, e.clientY);
+      const nearSrc = Math.hypot(cp.x-((pre.x||0)+NW), cp.y-((pre.y||0)+NH/2))
+                    < Math.hypot(cp.x-(dep.x||0),       cp.y-((dep.y||0)+NH/2));
+      pre.dependents = pre.dependents.filter(d => d !== depId);
+      dep.prereqs    = dep.prereqs.filter(p => p !== preId);
+      persist(); renderFlow();
+      // Start a ghost drag from the surviving endpoint so the user can reconnect
+      connDragging  = true;
+      connFromId    = nearSrc ? depId : preId;
+      connFromSide  = nearSrc ? 'pre' : 'post';
+      document.getElementById('ghost-svg').style.display = 'block';
+    }
+    e.preventDefault(); e.stopPropagation(); return;
   }
 
-  const port=e.target.closest('.node-port');
-  if(port) {
+  const port = e.target.closest('.node-port');
+  if(port && e.button === 0) {
     connDragging=true; connFromId=port.dataset.node; connFromSide=port.dataset.port;
     document.getElementById('ghost-svg').style.display='block';
     e.preventDefault(); e.stopPropagation(); return;
   }
   if(e.target.closest('[data-editname]')) return; // pencil handled on click
   if(e.target.dataset.cb) return;                 // checkbox handled on click
-  const nd=e.target.closest('.flow-node');
-  if(nd) {
+  const nd = e.target.closest('.flow-node');
+  if(nd && e.button === 0) {
     dragging=true; didDrag=false; dragId=nd.dataset.id;
     dragSM=toCanvas(e.clientX,e.clientY);
     const t=S.tasks[dragId]; dragSP={x:t.x||0,y:t.y||0};
     nd.classList.add('dragging'); e.preventDefault(); return;
   }
-  // Empty canvas: space = pan, otherwise = marquee select
+  // Empty canvas:
+  //   Left button (or space) = pan the canvas
+  //   Middle button          = marquee-select
   e.preventDefault();
-  if(spaceDown) {
-    panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
-    document.getElementById('flow-outer').classList.add('panning');
-  } else {
-    const r=document.getElementById('flow-outer').getBoundingClientRect();
+  if (e.button === 1) {
+    const r = document.getElementById('flow-outer').getBoundingClientRect();
     marqueeStart={x:e.clientX-r.left, y:e.clientY-r.top};
     marqueeCur={...marqueeStart}; marqueeMoved=false; marquee=true;
     document.getElementById('flow-outer').classList.add('marqueeing');
+  } else {
+    panning=true; panSM={x:e.clientX,y:e.clientY}; panST={...VT};
+    document.getElementById('flow-outer').classList.add('panning');
   }
 }
 
@@ -1251,6 +1295,7 @@ function onTE() {
 }
 
 function onCC(e) {
+  if(e.target.closest('#edges-svg')) { lastDrag=false; return; } // edge clicks handled in onMD
   if(e.target.closest('.node-port')) return;
   const editBtn=e.target.closest('[data-editname]');
   if(editBtn){ e.stopPropagation(); openTaskModal(editBtn.dataset.editname); return; }
@@ -1266,6 +1311,9 @@ function onCC(e) {
       selectedIds.clear(); selectedIds.add(nd.dataset.id);
     }
     updateSelectionClasses();
+  } else {
+    // click on empty canvas — deselect all
+    selectedIds.clear(); updateSelectionClasses();
   }
   lastDrag=false;
 }
