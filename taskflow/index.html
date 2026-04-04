@@ -29,6 +29,52 @@
     /* ── App layout ── */
     #app { display: flex; flex-direction: column; height: 100vh; }
 
+    /* ── Tab bar ── */
+    #tab-bar {
+      display: flex; align-items: flex-end; gap: 2px;
+      padding: 0 14px; background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      height: 38px; flex-shrink: 0;
+      overflow-x: auto; overflow-y: hidden;
+    }
+    #tab-bar::-webkit-scrollbar { height: 3px; }
+    #tab-bar::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
+    .tab {
+      display: flex; align-items: center; gap: 5px;
+      padding: 0 10px 0 12px; height: 30px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-bottom: none; border-radius: 6px 6px 0 0;
+      cursor: pointer; font-size: 13px; font-weight: 500;
+      color: var(--text2); white-space: nowrap;
+      position: relative; bottom: -1px; flex-shrink: 0;
+      transition: color .15s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { background: white; color: var(--text); z-index: 1; }
+    .tab-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+    .tab-name-input {
+      font-size: 13px; font-weight: 500; border: none; outline: none;
+      background: transparent; padding: 0; color: var(--text);
+      font-family: inherit; width: 100px;
+    }
+    .tab-close {
+      width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+      border: none; background: transparent; cursor: pointer; color: var(--text3);
+      border-radius: 3px; font-size: 15px; line-height: 1; padding: 0;
+      opacity: 0; transition: opacity .15s, background .15s, color .15s; flex-shrink: 0;
+    }
+    .tab:hover .tab-close, .tab.active .tab-close { opacity: 1; }
+    .tab-close:hover { background: #fee2e2; color: var(--danger); }
+    #tab-add {
+      display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; margin-bottom: 2px; flex-shrink: 0;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: transparent; cursor: pointer; color: var(--text3);
+      font-size: 18px; font-weight: 300; line-height: 1;
+      transition: all .15s;
+    }
+    #tab-add:hover { background: var(--primary-light); color: var(--primary); border-color: var(--primary); }
+
     /* ── Header ── */
     #header {
       height: var(--header-h); background: var(--surface);
@@ -411,6 +457,8 @@
     </div>
   </header>
 
+  <div id="tab-bar"></div>
+
   <main id="main">
     <div id="flow-view">
       <div id="flow-outer">
@@ -524,26 +572,52 @@ const SC = {
 // ════════════════════════════════════════════════════════════
 let S;
 
+function makeDefaultTasks() {
+  return {
+    t1:{ id:'t1', title:'Research market',        completed:false, prereqs:[],           dependents:['t2','t3'] },
+    t2:{ id:'t2', title:'Define MVP features',    completed:false, prereqs:['t1'],       dependents:['t4','t5'] },
+    t3:{ id:'t3', title:'Competitor analysis',    completed:false, prereqs:['t1'],       dependents:['t4'] },
+    t4:{ id:'t4', title:'Design UI mockups',      completed:false, prereqs:['t2','t3'],  dependents:['t6'] },
+    t5:{ id:'t5', title:'Set up dev environment', completed:false, prereqs:['t2'],       dependents:['t6','t7'] },
+    t6:{ id:'t6', title:'Build frontend',         completed:false, prereqs:['t4','t5'],  dependents:['t8'] },
+    t7:{ id:'t7', title:'Build backend API',      completed:false, prereqs:['t5'],       dependents:['t8'] },
+    t8:{ id:'t8', title:'QA & testing',           completed:false, prereqs:['t6','t7'],  dependents:['t9'] },
+    t9:{ id:'t9', title:'Deploy & launch',        completed:false, prereqs:['t8'],       dependents:[] },
+  };
+}
+
+function loadTabData(data) {
+  S.tasks        = data.tasks        || {};
+  S.hideCompleted = !!data.hideCompleted;
+  S.view         = data.view         || 'flow';
+}
+
 function initState() {
   try {
     const raw = localStorage.getItem('taskflow-v2');
-    if (raw) { S = JSON.parse(raw); if (S.hideCompleted===undefined) S.hideCompleted=false; return; }
-  } catch(e) {}
-  S = {
-    view: 'flow',
-    hideCompleted: false,
-    tasks: {
-      t1:{ id:'t1', title:'Research market',        completed:false, prereqs:[],           dependents:['t2','t3'] },
-      t2:{ id:'t2', title:'Define MVP features',    completed:false, prereqs:['t1'],       dependents:['t4','t5'] },
-      t3:{ id:'t3', title:'Competitor analysis',    completed:false, prereqs:['t1'],       dependents:['t4'] },
-      t4:{ id:'t4', title:'Design UI mockups',      completed:false, prereqs:['t2','t3'],  dependents:['t6'] },
-      t5:{ id:'t5', title:'Set up dev environment', completed:false, prereqs:['t2'],       dependents:['t6','t7'] },
-      t6:{ id:'t6', title:'Build frontend',         completed:false, prereqs:['t4','t5'],  dependents:['t8'] },
-      t7:{ id:'t7', title:'Build backend API',      completed:false, prereqs:['t5'],       dependents:['t8'] },
-      t8:{ id:'t8', title:'QA & testing',           completed:false, prereqs:['t6','t7'],  dependents:['t9'] },
-      t9:{ id:'t9', title:'Deploy & launch',        completed:false, prereqs:['t8'],       dependents:[] },
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (saved.tabs && saved.tabData) {
+        // Multi-tab format
+        S = { tabs: saved.tabs, activeTabId: saved.activeTabId, tabData: saved.tabData };
+        loadTabData(S.tabData[S.activeTabId] || {});
+        return;
+      }
+      if (saved.tasks) {
+        // Legacy single-board format — migrate to multi-tab
+        const tid = 'tab_init';
+        S = { tabs:[{id:tid,name:'Board 1'}], activeTabId:tid, tabData:{} };
+        S.tabData[tid] = { tasks:saved.tasks, hideCompleted:!!saved.hideCompleted, view:saved.view||'flow' };
+        loadTabData(S.tabData[tid]);
+        return;
+      }
     }
-  };
+  } catch(e) {}
+  // Fresh state
+  const tid = 'tab_init';
+  const tasks = makeDefaultTasks();
+  S = { tabs:[{id:tid,name:'Board 1'}], activeTabId:tid, tabData:{[tid]:{tasks,hideCompleted:false,view:'flow'}} };
+  loadTabData(S.tabData[tid]);
   doLayout();
   persist();
 }
@@ -555,7 +629,14 @@ let history = [], historyIndex = -1, skipHistory = false;
 let portraitLayout = false; // set by doLayout, used by renderEdges + computeEdgePath
 
 function persist() {
-  const json = JSON.stringify(S);
+  // Sync active tab's live state back into tabData before saving
+  if (S.tabData && S.activeTabId) {
+    S.tabData[S.activeTabId] = { tasks:S.tasks, hideCompleted:S.hideCompleted, view:S.view };
+  }
+  const toSave = S.tabs
+    ? { tabs:S.tabs, activeTabId:S.activeTabId, tabData:S.tabData }
+    : S;
+  const json = JSON.stringify(toSave);
   if (!skipHistory) {
     const snap = JSON.stringify(S.tasks);
     if (snap !== history[historyIndex]) {
@@ -732,6 +813,103 @@ function toggleHideCompleted() {
   persist(); render();
 }
 
+// ════════════════════════════════════════════════════════════
+// TABS
+// ════════════════════════════════════════════════════════════
+function renderTabs() {
+  const bar = document.getElementById('tab-bar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  S.tabs.forEach(tab => {
+    const el = document.createElement('div');
+    el.className = 'tab' + (tab.id === S.activeTabId ? ' active' : '');
+    el.dataset.id = tab.id;
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'tab-name';
+    nameEl.textContent = tab.name;
+    nameEl.addEventListener('dblclick', e => { e.stopPropagation(); startTabRename(tab.id); });
+    el.appendChild(nameEl);
+
+    if (S.tabs.length > 1) {
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'tab-close';
+      closeBtn.title = 'Delete tab';
+      closeBtn.textContent = '×';
+      closeBtn.addEventListener('click', e => { e.stopPropagation(); deleteTab(tab.id); });
+      el.appendChild(closeBtn);
+    }
+
+    el.addEventListener('click', () => switchTab(tab.id));
+    bar.appendChild(el);
+  });
+
+  const addBtn = document.createElement('button');
+  addBtn.id = 'tab-add';
+  addBtn.title = 'New tab';
+  addBtn.textContent = '+';
+  addBtn.addEventListener('click', addTab);
+  bar.appendChild(addBtn);
+}
+
+function switchTab(tabId) {
+  if (tabId === S.activeTabId) return;
+  persist(); // syncs current tab to tabData
+  S.activeTabId = tabId;
+  loadTabData(S.tabData[tabId] || {});
+  history = [JSON.stringify(S.tasks)]; historyIndex = 0;
+  selectedIds.clear();
+  persist(); render();
+}
+
+function addTab() {
+  const tabId = 'tab_' + Date.now();
+  const name  = 'Board ' + (S.tabs.length + 1);
+  S.tabs.push({ id: tabId, name });
+  S.tabData[tabId] = { tasks:{}, hideCompleted:false, view:'flow' };
+  switchTab(tabId);
+}
+
+function deleteTab(tabId) {
+  if (S.tabs.length <= 1) return;
+  const tab = S.tabs.find(t => t.id === tabId);
+  if (!confirm(`Delete "${tab?.name || 'this tab'}"? All tasks in it will be lost.`)) return;
+  const idx = S.tabs.findIndex(t => t.id === tabId);
+  S.tabs.splice(idx, 1);
+  delete S.tabData[tabId];
+  if (tabId === S.activeTabId) {
+    S.activeTabId = S.tabs[Math.min(idx, S.tabs.length - 1)].id;
+    loadTabData(S.tabData[S.activeTabId]);
+    history = [JSON.stringify(S.tasks)]; historyIndex = 0;
+  }
+  selectedIds.clear();
+  persist(); render();
+}
+
+function startTabRename(tabId) {
+  const nameEl = document.querySelector(`.tab[data-id="${tabId}"] .tab-name`);
+  if (!nameEl) return;
+  const tab = S.tabs.find(t => t.id === tabId);
+  if (!tab) return;
+  const input = document.createElement('input');
+  input.className = 'tab-name-input';
+  input.value = tab.name;
+  nameEl.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  function finish(cancel) {
+    if (done) return; done = true;
+    const val = input.value.trim();
+    if (!cancel && val) tab.name = val;
+    persist(); renderTabs();
+  }
+  input.addEventListener('blur', () => finish(false));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); finish(false); }
+    if (e.key === 'Escape') { finish(true); }
+  });
+}
+
 function autoArrange() {
   doLayout(); persist();
   if (S.view==='flow') { renderFlow(); fitView(); }
@@ -778,6 +956,7 @@ function cleanUp() {
 // RENDER
 // ════════════════════════════════════════════════════════════
 function render() {
+  renderTabs();
   updateHdrProgress();
   document.getElementById('btn-flow').classList.toggle('active', S.view==='flow');
   document.getElementById('btn-list').classList.toggle('active', S.view==='list');
@@ -1543,6 +1722,7 @@ async function init() {
   if (!(await tryLoadFromHash())) initState();
   if (Object.values(S.tasks).some(t=>t.x===undefined)) doLayout();
   if(history.length===0){ history=[JSON.stringify(S.tasks)]; historyIndex=0; }
+  renderTabs();
   document.getElementById('modal-overlay').addEventListener('mousedown', e=>{
     if(e.target===document.getElementById('modal-overlay')) closeModal();
   });
@@ -1602,7 +1782,16 @@ async function tryLoadFromHash() {
     const json = mv2 ? await decompress(mv2[1]) : decodeV1(mv1[1]);
     const data = JSON.parse(json);
     if (!data?.tasks || typeof data.tasks !== 'object') return false;
-    S = { view:'flow', hideCompleted: !!data.hideCompleted, tasks: data.tasks };
+    // Import as a new tab in the existing board (or initialise fresh if first load)
+    const tid = 'tab_' + Date.now();
+    if (!S.tabs) {
+      S = { tabs:[{id:tid,name:'Shared Board'}], activeTabId:tid, tabData:{} };
+    } else {
+      S.tabs.push({ id:tid, name:'Shared Board' });
+      S.activeTabId = tid;
+    }
+    S.tabData[tid] = { tasks:data.tasks, hideCompleted:!!data.hideCompleted, view:'flow' };
+    loadTabData(S.tabData[tid]);
     persist();
     history.replaceState(null, '', location.pathname + location.search);
     return true;
